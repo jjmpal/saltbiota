@@ -1,0 +1,195 @@
+---
+title: "Impact of Dietary Salt Intake on Gut Microbiota Composition in FINRISK 2002"
+author: "Joonatan Palmu"
+date: "`r format(Sys.time(), '%d.%m.%Y')`"
+---
+
+# Setup
+
+```{r load functions}
+devtools::load_all()
+```
+
+## Formatting options
+
+```{r options, echo = FALSE}
+knitr::opts_chunk$set(include = TRUE, echo = TRUE, message = FALSE, results='asis', cache=FALSE, warning=FALSE, error = TRUE)
+```
+
+## Arguments
+
+```{r}
+args <- list(
+  optparse::make_option("--prevalence", default = 5/100),
+  optparse::make_option("--detection", default = 0.01/100),
+  optparse::make_option("--cores", default = 10)) %>% 
+  optparse::OptionParser(option_list = .) %>%
+  optparse::parse_args()
+```
+
+```{r}
+args %>% tibble::enframe(name = "Option", value = "Argument") %>% knitr::kable()
+```
+
+    
+# Data definitions
+
+```{r}
+vars <- list(BL_AGE = "Age",
+          MEN = "Men",
+          BMI = "BMI",
+          CURR_SMOKE = "Smoking",
+          ALKI2_FR02 = "Alcohol",
+          Q57X = "Physical activity",
+          PREVAL_DIAB = "Diabetes",
+          dUNA = "24‐Hour Sodium Excretion",
+          KREA_ENTS = "Creatinine",
+          EAST = "Eastern Finland",
+          total_read_count = "Total read count") 
+```
+
+```{r}
+tse <- readRDS("data/tse_gg2_MGS_FR02.rds") %>% 
+  tse_add_counts() %>% 
+  mia::transformAssay(assay.type = "counts", method = "relabundance") %>% 
+  tse_filter(GRAVID %in% c(1, NA), BL_USE_RX_J01_1mo %in% c(0, NA), total_read_count > 50000) %>% 
+  tse_mutate(dplyr::across(c(MEN, CURR_SMOKE, Q57X, PREVAL_DIAB), as.factor)) %>% 
+  tse_mutate(dUNA = NA.* U_VIRTSA_YHT/1000) %>%
+  tse_select(names(vars)) %>% 
+  tse_filter(dplyr::if_all(dplyr::one_of(names(vars)), not_na)) %>%
+  mia::estimateDiversity(assay.type = "counts", index = "shannon", name = "shannon")
+```
+
+```{r}
+tse_genus <- mia::agglomerateByRank(tse, rank = "Genus")
+tse_species <- mia::agglomerateByRank(tse, rank = "Species")
+```
+
+# Characteristics
+
+```{r}
+tse %>%
+  tse_meta(rownames = FALSE) %>% 
+  mytableone(vars)
+```
+
+# Diversity
+
+## Alpha diversity
+
+```{r}
+tse %>%
+  tse_meta() %>%
+  lm(scale(shannon) ~ dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB + KREA_ENTS, data = .) %>%
+  broom::tidy() %>%
+  round_numeric_columns() %>% 
+  knitr::kable(caption = "Alpha diversity")
+```
+
+## Beta diveristy
+
+```{r}
+tse_beta <- mia::runRDA(tse,
+                        assay.type = "relabundance",
+                        formula = assay ~ BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB + KREA_ENTS + dUNA,
+                        distance = "bray")
+```
+
+```{r}
+rda_info <- attr(SingleCellExperiment::reducedDim(tse_beta, "RDA"), "significance")
+```
+
+```{r}
+rda_info$permanova %>% 
+  knitr::kable(caption = "Beta diversity (PERMANOVA)")
+```
+
+# Prevalence
+
+```{r}
+
+mia::getPrevalence(tse_species, detection = args$detection) %>%
+  tibble::enframe(name = "taxa", value = "prevalence") %>%
+  dplyr::filter(prevalence > args$prevalence) %>%
+  dplyr::arrange(-prevalence) %>%
+  embed_tsv(name = "Prevalence of common species")
+```
+
+```{r}
+mia::getPrevalence(tse_genus, detection = args$detection) %>%
+  tibble::enframe(name = "taxa", value = "prevalence") %>%
+  dplyr::filter(prevalence > args$prevalence) %>%
+  dplyr::arrange(-prevalence) %>%
+  embed_tsv(name = "Prevalence of common genera")
+```
+
+
+# Maaslin3
+
+## Species
+
+```{r}
+maaslin3_species <- tse_species %>%
+  maaslin3::maaslin3(output = "DAA_species",
+                     formula = "~ dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB + KREA_ENTS",
+                     min_abundance = args$detection,
+                     min_prevalence = args$prevalence,
+                     normalization = "TSS",
+                     transform = "LOG",
+                     plot_associations = FALSE,
+                     coef_plot_vars = c("dUNA", "KREA_ENTS"),
+                     cores = args$cores,
+                     verbosity = "ERROR")
+```
+
+```{r}
+maaslin3_species[["fit_data_abundance"]][["results"]] %>%
+  dplyr::filter(name == "dUNA") %>%
+  dplyr::filter(qval_joint < 0.05) %>%
+  dplyr::select(feature, name, model, coef, qval_individual, qval_joint) %>% 
+  knitr::kable(caption = "The results from the fit abundance models")
+```
+
+```{r}
+maaslin3_species[["fit_data_abundance"]][["results"]] %>%
+  embed_tsv(name = "Maaslin3 abundance results for species")
+```
+
+```{r}
+maaslin3_species[["fit_data_prevalence"]][["results"]] %>%
+  embed_tsv(name = "Maaslin3 prevalence results for species")
+```
+
+## Genus
+
+```{r}
+maaslin3_genus <- tse_genus %>%
+  maaslin3::maaslin3(output = "DAA_genus",
+                     formula = "~ dUNA + BL_AGE + MEN + CURR_SMOKE + ALKI2_FR02 + Q57X + PREVAL_DIAB + KREA_ENTS",
+                     min_abundance = args$detection,
+                     min_prevalence = args$prevalence,
+                     normalization = "TSS",
+                     transform = "LOG",
+                     plot_associations = FALSE,
+                     coef_plot_vars = c("dUNA", "KREA_ENTS"),
+                     cores = args$cores,
+                     verbosity = "ERROR")
+```
+
+```{r}
+maaslin3_genus[["fit_data_abundance"]][["results"]] %>%
+  dplyr::filter(name == "dUNA") %>%
+  dplyr::filter(qval_joint < 0.05) %>%
+  dplyr::select(feature, name, model, coef, qval_individual, qval_joint) %>% 
+  knitr::kable(caption = "The results from the fit abundance models")
+```
+
+```{r}
+maaslin3_genus[["fit_data_abundance"]][["results"]] %>%
+  embed_tsv(name = "Maaslin3 abundance results for genera")
+```
+
+```{r}
+maaslin3_genus[["fit_data_prevalence"]][["results"]] %>%
+  embed_tsv(name = "Maaslin3 prevalence results for genera")
+```
